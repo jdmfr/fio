@@ -27,11 +27,13 @@
 #include "cmdprio.h"
 #include "zbd.h"
 #include "nvme.h"
+#include "virtblk.h"
 
 #include <sys/stat.h>
 
 enum uring_cmd_type {
 	FIO_URING_CMD_NVME = 1,
+	FIO_URING_CMD_VIRTBLK = 2,
 };
 
 enum uring_cmd_write_mode {
@@ -303,6 +305,10 @@ static struct fio_option options[] = {
 			    .oval = FIO_URING_CMD_NVME,
 			    .help = "Issue nvme-uring-cmd",
 			  },
+			  { .ival = "virtblk",
+			    .oval = FIO_URING_CMD_VIRTBLK,
+			    .help = "Issue virtblk-uring-cmd",
+			  },
 		},
 		.category = FIO_OPT_C_ENGINE,
 		.group	= FIO_OPT_G_IOURING,
@@ -490,15 +496,15 @@ static int fio_ioring_cmd_prep(struct thread_data *td, struct io_u *io_u)
 	struct ioring_data *ld = td->io_ops_data;
 	struct ioring_options *o = td->eo;
 	struct fio_file *f = io_u->file;
-	struct nvme_uring_cmd *cmd;
+	void *cmd;
 	struct io_uring_sqe *sqe;
 	struct nvme_dsm *dsm;
 	void *ptr = ld->dsm;
 	unsigned int dsm_size;
 	uint8_t read_opcode = nvme_cmd_read;
 
-	/* only supports nvme_uring_cmd */
-	if (o->cmd_type != FIO_URING_CMD_NVME)
+	/* only supports nvme_uring_cmd and virtblk_uring_cmd */
+	if (o->cmd_type != FIO_URING_CMD_NVME && o->cmd_type != FIO_URING_CMD_VIRTBLK)
 		return -EINVAL;
 
 	if (io_u->ddir == DDIR_TRIM && td->io_ops->flags & FIO_ASYNCIO_SYNC_TRIM)
@@ -518,10 +524,16 @@ static int fio_ioring_cmd_prep(struct thread_data *td, struct io_u *io_u)
 
 	sqe->opcode = IORING_OP_URING_CMD;
 	sqe->user_data = (unsigned long) io_u;
-	if (o->nonvectored)
-		sqe->cmd_op = NVME_URING_CMD_IO;
-	else
-		sqe->cmd_op = NVME_URING_CMD_IO_VEC;
+
+	if (o->cmd_type == FIO_URING_CMD_NVME) {
+		if (o->nonvectored)
+			sqe->cmd_op = NVME_URING_CMD_IO;
+		else
+			sqe->cmd_op = NVME_URING_CMD_IO_VEC;
+	} else {
+		sqe->cmd_op = o->nonvectored ? VIRTBLK_URING_CMD_IO : VIRTBLK_URING_CMD_IO_VEC;
+	}
+
 	if (o->force_async && ++ld->prepped == o->force_async) {
 		ld->prepped = 0;
 		sqe->flags |= IOSQE_ASYNC;
@@ -531,7 +543,7 @@ static int fio_ioring_cmd_prep(struct thread_data *td, struct io_u *io_u)
 		sqe->buf_index = io_u->index;
 	}
 
-	cmd = (struct nvme_uring_cmd *)sqe->cmd;
+	cmd = sqe->cmd;
 	dsm_size = sizeof(*ld->dsm) + td->o.num_range * sizeof(struct nvme_dsm_range);
 	ptr += io_u->index * dsm_size;
 	dsm = (struct nvme_dsm *)ptr;
@@ -547,10 +559,14 @@ static int fio_ioring_cmd_prep(struct thread_data *td, struct io_u *io_u)
 		io_u_set(td, io_u, IO_U_F_VER_IN_DEV);
 	}
 
-	return fio_nvme_uring_cmd_prep(cmd, io_u,
+	if (o->cmd_type == FIO_URING_CMD_NVME)
+		return fio_nvme_uring_cmd_prep(cmd, io_u,
 			o->nonvectored ? NULL : &ld->iovecs[io_u->index],
 			dsm, read_opcode, ld->write_opcode,
 			ld->cdw12_flags[io_u->ddir]);
+	else
+		return fio_virtblk_uring_cmd_prep((struct virtblk_uring_cmd *)cmd, io_u,
+                        o->nonvectored ? NULL : &ld->iovecs[io_u->index]);
 }
 
 static struct io_u *fio_ioring_event(struct thread_data *td, int event)
@@ -597,7 +613,7 @@ static struct io_u *fio_ioring_cmd_event(struct thread_data *td, int event)
 	int ret;
 
 	index = (event + ld->cq_ring_off) & ld->cq_ring_mask;
-	if (o->cmd_type == FIO_URING_CMD_NVME)
+	if (o->cmd_type == FIO_URING_CMD_NVME || o->cmd_type == FIO_URING_CMD_VIRTBLK)
 		index <<= 1;
 
 	cqe = &ld->cq_ring.cqes[index];
@@ -1110,7 +1126,7 @@ static int fio_ioring_cmd_queue_init(struct thread_data *td)
 		 */
 		td->o.disable_slat = 1;
 	}
-	if (o->cmd_type == FIO_URING_CMD_NVME) {
+	if (o->cmd_type == FIO_URING_CMD_NVME || o->cmd_type == FIO_URING_CMD_VIRTBLK) {
 		p.flags |= IORING_SETUP_SQE128;
 		p.flags |= IORING_SETUP_CQE32;
 	}
@@ -1451,7 +1467,7 @@ static void fio_ioring_io_u_free(struct thread_data *td, struct io_u *io_u)
 	struct nvme_pi *pi;
 
 	if (!strcmp(td->io_ops->name, "io_uring_cmd") &&
-	    (o->cmd_type == FIO_URING_CMD_NVME)) {
+	    (o->cmd_type == FIO_URING_CMD_NVME || o->cmd_type == FIO_URING_CMD_VIRTBLK)) {
 		pi = io_u->engine_data;
 		free(pi);
 		io_u->engine_data = NULL;
@@ -1610,7 +1626,28 @@ static int fio_ioring_cmd_get_file_size(struct thread_data *td,
 
 		FILE_SET_ENG_DATA(f, data);
 		return 0;
-	}
+	} else if (o->cmd_type == FIO_URING_CMD_VIRTBLK) {
+                struct virtblk_data *data=NULL;
+		__u64 bytes;
+                int ret;
+
+                ret = fio_virtblk_get_info(f, &bytes);
+                if (ret)
+                        return ret;
+
+		data = calloc(1,sizeof(struct virtblk_data));
+                ret = fio_virtblk_get_lba_shift(f->file_name);
+                if(!ret){
+                        log_err("get /dev/vdXc0 lba_shift failed");
+                }
+                data->lba_shift = ilog2(ret);
+
+                f->real_file_size = bytes;
+                fio_file_set_size_known(f);
+
+		FILE_SET_ENG_DATA(f,data);
+                return 0;
+        }
 	return generic_get_file_size(td, f);
 }
 
@@ -1618,7 +1655,10 @@ static int fio_ioring_cmd_get_zoned_model(struct thread_data *td,
 					  struct fio_file *f,
 					  enum zbd_zoned_model *model)
 {
-	return fio_nvme_get_zoned_model(td, f, model);
+	if(((struct ioring_options*)td->eo)->cmd_type == FIO_URING_CMD_NVME)
+		return fio_nvme_get_zoned_model(td, f, model);
+	else
+		return -EIO;
 }
 
 static int fio_ioring_cmd_report_zones(struct thread_data *td,
@@ -1626,20 +1666,29 @@ static int fio_ioring_cmd_report_zones(struct thread_data *td,
 				       struct zbd_zone *zbdz,
 				       unsigned int nr_zones)
 {
-	return fio_nvme_report_zones(td, f, offset, zbdz, nr_zones);
+	if(((struct ioring_options*)td->eo)->cmd_type == FIO_URING_CMD_NVME)
+		return fio_nvme_report_zones(td, f, offset, zbdz, nr_zones);
+	else
+		return -EIO;
 }
 
 static int fio_ioring_cmd_reset_wp(struct thread_data *td, struct fio_file *f,
 				   uint64_t offset, uint64_t length)
 {
-	return fio_nvme_reset_wp(td, f, offset, length);
+	if(((struct ioring_options*)td->eo)->cmd_type == FIO_URING_CMD_NVME)
+		return fio_nvme_reset_wp(td, f, offset, length);
+	else
+                return -EIO;
 }
 
 static int fio_ioring_cmd_get_max_open_zones(struct thread_data *td,
 					     struct fio_file *f,
 					     unsigned int *max_open_zones)
 {
-	return fio_nvme_get_max_open_zones(td, f, max_open_zones);
+	if(((struct ioring_options*)td->eo)->cmd_type == FIO_URING_CMD_NVME)
+		return fio_nvme_get_max_open_zones(td, f, max_open_zones);
+	else
+                return -EIO;
 }
 
 static int fio_ioring_cmd_fetch_ruhs(struct thread_data *td, struct fio_file *f,
@@ -1648,6 +1697,8 @@ static int fio_ioring_cmd_fetch_ruhs(struct thread_data *td, struct fio_file *f,
 	struct nvme_fdp_ruh_status *ruhs;
 	int bytes, nr_ruhs, ret, i;
 
+	if(((struct ioring_options*)td->eo)->cmd_type != FIO_URING_CMD_NVME)
+		return -EIO;
 	nr_ruhs = fruhs_info->nr_ruhs;
 	bytes = sizeof(*ruhs) + fruhs_info->nr_ruhs * sizeof(struct nvme_fdp_ruh_status_desc);
 

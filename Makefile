@@ -217,7 +217,7 @@ ifdef CONFIG_LIBBLKIO
 endif
 ifeq ($(CONFIG_TARGET_OS), Linux)
   SOURCE += diskutil.c fifo.c blktrace.c cgroup.c trim.c engines/sg.c \
-		oslib/linux-dev-lookup.c engines/io_uring.c engines/nvme.c
+		oslib/linux-dev-lookup.c engines/io_uring.c engines/nvme.c engines/virtblk.c
   cmdprio_SRCS = engines/cmdprio.c
 ifdef CONFIG_HAS_BLKZONED
   SOURCE += oslib/linux-blkzoned.c
@@ -228,7 +228,7 @@ endif
 ifeq ($(CONFIG_TARGET_OS), Android)
   SOURCE += diskutil.c fifo.c blktrace.c cgroup.c trim.c profiles/tiobench.c \
 		oslib/linux-dev-lookup.c engines/io_uring.c engines/nvme.c \
-		engines/sg.c
+		engines/sg.c engines/virtblk.c
   cmdprio_SRCS = engines/cmdprio.c
 ifdef CONFIG_HAS_BLKZONED
   SOURCE += oslib/linux-blkzoned.c
