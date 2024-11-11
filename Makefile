@@ -371,6 +371,10 @@ T_PIPE_ASYNC_PROGS = t/read-to-pipe-async
 T_IOU_RING_OBJS = t/io_uring.o lib/rand.o lib/pattern.o lib/strntol.o
 T_IOU_RING_PROGS = t/io_uring
 
+
+T_IOU_RING_VBLK_OBJS = t/io_uring-vblk.o lib/rand.o lib/pattern.o lib/strntol.o
+T_IOU_RING_VBLK_PROGS = t/io_uring-vblk
+
 T_MEMLOCK_OBJS = t/memlock.o
 T_MEMLOCK_PROGS = t/memlock
 
@@ -438,6 +442,7 @@ T_TEST_PROGS += $(T_PIPE_ASYNC_PROGS)
 endif
 ifneq (,$(findstring Linux,$(CONFIG_TARGET_OS)))
 T_TEST_PROGS += $(T_IOU_RING_PROGS)
+T_TEST_PROGS += $(T_IOU_RING_VBLK_PROGS)
 endif
 T_TEST_PROGS += $(T_FUZZ_PROGS)
 
@@ -584,6 +589,9 @@ t/io_uring.o: os/linux/io_uring.h
 t/io_uring: $(T_IOU_RING_OBJS)
 	$(QUIET_LINK)$(CC) $(LDFLAGS) -o $@ $(T_IOU_RING_OBJS) $(LIBS)
 
+t/io_uring-vblk.o: os/linux/io_uring.h
+t/io_uring-vblk: $(T_IOU_RING_VBLK_OBJS)
+	$(QUIET_LINK)$(CC) $(LDFLAGS) -o $@ $(T_IOU_RING_VBLK_OBJS) $(LIBS)
 t/read-to-pipe-async: $(T_PIPE_ASYNC_OBJS)
 	$(QUIET_LINK)$(CC) $(LDFLAGS) -o $@ $(T_PIPE_ASYNC_OBJS) $(LIBS)
 

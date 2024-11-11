@@ -93,6 +93,7 @@ int fio_virtblk_get_lba_shift(char* f_name)
 		fclose(file);
 		return 0;
 	}
+	printf("pbs is 0x%llx\n",block_size);
 	fclose(file);
 	return block_size;
 }
@@ -115,7 +116,7 @@ int fio_virtblk_get_info(struct fio_file *f, __u64 *bytes)
 	err = ioctl(fd, BLKGETSIZE64, bytes);
 	if (err < 0)
 		return err;
-
+	printf("blksize is 0x%llx\n",*bytes);
 	close(fd);
 	return 0;
 }
